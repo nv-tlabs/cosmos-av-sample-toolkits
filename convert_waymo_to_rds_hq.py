@@ -32,6 +32,14 @@ IndexScaleRatio = int(TargetFps / SourceFps)
 if int(tf.__version__.split(".")[0]) < 2:
     tf.enable_eager_execution()
 
+# make sure the GPU memory is not exhausted
+physical_devices = tf.config.list_physical_devices('GPU')
+if physical_devices:
+    try:
+        for device in physical_devices:
+            tf.config.experimental.set_memory_growth(device, True)
+    except Exception as e:
+        print(e)
 
 def get_camera_name(name_int) -> str:
     return dataset_pb2.CameraName.Name.Name(name_int)
@@ -123,7 +131,7 @@ def convert_waymo_hdmap(output_root: Path, clip_id: str, dataset: tf.data.TFReco
                 polygon = [[point['x'], point['y'], point['z']] for point in hdmap_data]
                 hdmap_name_to_data[hdmap_name_lower].append(polygon)
             else:
-                raise ValueError(f"Invalid hdmap name: {hdmap_name}")
+                print(f"Unkown hdmap item name: {hdmap_name}，skip this item")
 
         # only process the first frame
         break
@@ -343,7 +351,7 @@ def convert_waymo_lidar(output_root: Path, clip_id: str, dataset: tf.data.TFReco
     write_to_tar(sample, output_root / 'lidar_raw' / f'{clip_id}.tar')
 
 
-def convert_waymo_image(output_root: Path, clip_id: str, dataset: tf.data.TFRecordDataset):
+def convert_waymo_image(output_root: Path, clip_id: str, dataset: tf.data.TFRecordDataset, single_camera: bool = False  ):
     """
     read all frames and convert the images to video format.
     """
@@ -366,8 +374,8 @@ def convert_waymo_image(output_root: Path, clip_id: str, dataset: tf.data.TFReco
     
     for camera_name, image_sequence in camera_name_to_image_sequence.items():
         # waymo is recorded at 10 Hz
-        ## if camera_name != 'front':
-        ##    continue
+        if single_camera and camera_name != 'front':
+           continue
         output_video_path = (output_root / f"pinhole_{camera_name}" / f'{clip_id}.mp4')
         output_video_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -381,7 +389,8 @@ def convert_waymo_image(output_root: Path, clip_id: str, dataset: tf.data.TFReco
 
 def convert_waymo_tfrecord_to_wds(
     waymo_tfrecord_filename: Union[str, Path],
-    output_wds_path: Union[str, Path]
+    output_wds_path: Union[str, Path],
+    single_camera: bool = False
 ):
     waymo_tfrecord_path = Path(waymo_tfrecord_filename)
     clip_id = waymo_tfrecord_path.stem.lstrip('segment-').rstrip('_with_camera_labels')
@@ -401,13 +410,14 @@ def convert_waymo_tfrecord_to_wds(
     convert_waymo_pose(output_wds_path, clip_id, dataset)
     convert_waymo_bbox(output_wds_path, clip_id, dataset)
     convert_waymo_lidar(output_wds_path, clip_id, dataset)
-    convert_waymo_image(output_wds_path, clip_id, dataset)
+    convert_waymo_image(output_wds_path, clip_id, dataset, single_camera)
 
 @click.command()
 @click.option("--waymo_tfrecord_root", "-i", type=str, help="Waymo tfrecord root")
 @click.option("--output_wds_path", "-o", type=str, help="Output wds path")
 @click.option("--num_workers", "-n", type=int, default=1, help="Number of workers")
-def main(waymo_tfrecord_root: str, output_wds_path: str, num_workers: int):
+@click.option("--single_camera", "-s", type=bool, default=False, help="Convert only front camera")
+def main(waymo_tfrecord_root: str, output_wds_path: str, num_workers: int, single_camera: bool):
     all_filenames = list(Path(waymo_tfrecord_root).glob("*.tfrecord"))
     print(f"Found {len(all_filenames)} tfrecords")
 
@@ -416,7 +426,8 @@ def main(waymo_tfrecord_root: str, output_wds_path: str, num_workers: int):
             executor.submit(
                 convert_waymo_tfrecord_to_wds,
                 waymo_tfrecord_filename=filename,
-                output_wds_path=output_wds_path
+                output_wds_path=output_wds_path,
+                single_camera=single_camera
             ) 
             for filename in all_filenames
         ]

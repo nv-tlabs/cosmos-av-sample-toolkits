@@ -367,7 +367,7 @@ def render_sample(
 @click.option("--skip", "-s", multiple=True, help="can be 'hdmap' or 'lidar'")
 @click.option("--output_folder", "-f", type=str, default="render", help="Output folder")
 @click.option("--post_training", "-p", type=bool, default=False, help="if True, output the RGB video for post-training")
-@click.option("--transfer_format", type=bool, default=False, action="store_true", help="output in transfer1 folder structure")
+@click.option("--transfer_format", type=bool, default=False, help="output in transfer1 folder structure")
 @click.option("--num", "-n", type=int, default=-1, help="num clips to process")
 def main(input_root, output_root, dataset, camera_type, skip, output_folder, post_training, transfer_format, num):
     local_rank = int(os.environ.get("LOCAL_RANK", 0))

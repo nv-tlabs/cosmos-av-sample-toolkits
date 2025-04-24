@@ -102,7 +102,13 @@ def _encode_for_batch(
     default='/lustre/fsw/portfolios/nvr/projects/nvr_torontoai_holodeck/cosmos-mads-dataset-av/{CAMERAS.index(cur_camera)}/txt_mount_qwen_embed_fp32',
     help="Path to the folder where the embeddings will be saved.",
 )
-def main(caption_file, save_embd_folder):
+@click.option(
+    "--videos_folder",
+    type=str,
+    default='',
+    help="Optional. Path to the exported videos. Only encode prompts for videos that are present",
+)
+def main(caption_file, save_embd_folder, videos_folder):
     """
     Main function to create T5 embeddings from caption files.
     """
@@ -112,7 +118,11 @@ def main(caption_file, save_embd_folder):
     df = pd.read_csv(caption_file, header=None)
     key_list = df.iloc[0].tolist()
     caption_list = df.iloc[1].tolist()
-
+    if videos_folder:
+        video_paths = [os.path.join(videos_folder, f) for f in os.listdir(videos_folder) if f.endswith(".mp4")]
+        video_id_to_name = {}
+        for vpath in video_paths:
+            video_id_to_name[os.path.basename(vpath).split(".")[0][:-2]] = vpath
     prompts = []
     all_keys = []
     caption = {}
@@ -120,7 +130,9 @@ def main(caption_file, save_embd_folder):
         # check if already processed
         if os.path.exists(os.path.join(save_embd_folder, key + ".pkl")):
             continue
-        
+        if videos_folder:
+            if not key in video_id_to_name:
+                continue
         all_keys.append(key)
         prompts.append(cap)
         caption[all_keys[-1]] = prompts[-1]
@@ -155,7 +167,7 @@ def main(caption_file, save_embd_folder):
     }
 
     for i in tqdm(range(n_batch)):
-        prompt = prompts[i * batch_size : (i + 1) * batch_size]
+        prompt = prompts[i * batch_size : min((i + 1) * batch_size, len(prompts))]
         out = _encode_for_batch(prompt)
         for j in range(len(out)):
             emb = out[j]

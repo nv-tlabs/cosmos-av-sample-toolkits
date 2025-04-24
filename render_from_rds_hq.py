@@ -55,6 +55,7 @@ def render_sample(
         target_resolution: tuple[int, int] = (1280, 720),
         crop_resolution: tuple[int, int] = (1280, 704),
         accumulate_lidar_frames: int = 2,
+        transfer_format: bool = False,
 ):
     if post_training: 
         TARGET_RENDER_FPS = 10
@@ -289,15 +290,19 @@ def render_sample(
                     crop_y = (target_h - crop_h) // 2
                     frame_resized = frame_resized[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w]
                 all_frames_resized.append(frame_resized)
-
-        (output_root / camera_name / output_folder / clip_id).mkdir(parents=True, exist_ok=True)
+        if transfer_format:
+            (output_root / "videos" / camera_name).mkdir(parents=True, exist_ok=True)
+            (output_root / "hdmap" / camera_name).mkdir(parents=True, exist_ok=True)
+            (output_root / "lidar" / camera_name).mkdir(parents=True, exist_ok=True)
+        else:
+            (output_root / camera_name / output_folder / clip_id).mkdir(parents=True, exist_ok=True)
         for cur_idx, i in enumerate(range(3, len(valid_frame_ids), CUT_LEN - OVERLAP)):
             if i + CUT_LEN > len(valid_frame_ids):
                 continue
-
             if post_training:
                 # save rgb video
                 rgb_writer = imageio_v1.get_writer(
+                    output_root / "videos" / camera_name / f"{clip_id}_{cur_idx}.mp4" if transfer_format else \
                     output_root / camera_name / output_folder / clip_id /f"{cur_idx}_rgb.mp4",
                     fps=TARGET_RENDER_FPS,
                     codec="libx264",
@@ -318,7 +323,8 @@ def render_sample(
 
                 # save HD map condition video
                 map_writer = imageio_v1.get_writer(
-                    output_root / camera_name / output_folder / clip_id /f"{cur_idx}_hdmap_cond.mp4",
+                    output_root / "hdmap" / camera_name / f"{clip_id}_{cur_idx}.mp4" if transfer_format else \
+                        output_root / camera_name / output_folder / clip_id /f"{cur_idx}_hdmap_cond.mp4",
                     fps=TARGET_RENDER_FPS,
                     codec="libx264",
                     macro_block_size=None,  # This makes sure num_frames is correct (by default it is rounded to 16x).
@@ -337,7 +343,8 @@ def render_sample(
 
                 # save lidar condition video
                 lidar_writer = imageio_v1.get_writer(
-                    output_root / camera_name / output_folder / clip_id /f"{cur_idx}_lidar_cond.mp4",
+                    output_root / "lidar" / camera_name / f"{clip_id}_{cur_idx}.mp4" if transfer_format else \
+                        output_root / camera_name / output_folder / clip_id /f"{cur_idx}_lidar_cond.mp4",
                     fps=TARGET_RENDER_FPS,
                     codec="libx264",
                     macro_block_size=None,  # This makes sure num_frames is correct (by default it is rounded to 16x).
@@ -360,8 +367,9 @@ def render_sample(
 @click.option("--skip", "-s", multiple=True, help="can be 'hdmap' or 'lidar'")
 @click.option("--output_folder", "-f", type=str, default="render", help="Output folder")
 @click.option("--post_training", "-p", type=bool, default=False, help="if True, output the RGB video for post-training")
+@click.option("--transfer_format", type=bool, default=False, action="store_true", help="output in transfer1 folder structure")
 @click.option("--num", "-n", type=int, default=-1, help="num clips to process")
-def main(input_root, output_root, dataset, camera_type, skip, output_folder, post_training, num):
+def main(input_root, output_root, dataset, camera_type, skip, output_folder, post_training, transfer_format, num):
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     setup(local_rank, world_size)

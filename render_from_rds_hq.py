@@ -411,6 +411,7 @@ def main(input_root, output_root, dataset, camera_type, skip, output_folder, pos
             skip = skip,
             output_folder = output_folder,
             post_training = post_training,
+            transfer_format=transfer_format
         )
 
 if __name__ == "__main__":

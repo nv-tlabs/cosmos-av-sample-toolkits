@@ -30,7 +30,7 @@ from utils.ray_utils import ray_remote, wait_for_futures
 
 USE_RAY = True
 
-def get_low_fps_indices(high_indices, step=3):
+def get_nearest_lidar_indices(high_indices, step=3):
     low_indices = []
     low_indices_times_step = []
     for hi in high_indices:
@@ -128,7 +128,7 @@ def prepare_input(input_root, clip_id, settings, camera_type, post_training, res
             else:
                 cprint(f"Ftheta intrinsic file does not exist: {intrinsic_file}", 'red')
                 cprint(f"===> So we will use default ftheta intrinsic for rendering", 'yellow', attrs=['bold'])
-                intrinsic_file = 'config/default_ftheta_intrinsic.tar'
+                intrinsic_file = 'assets/default_ftheta_intrinsic.tar'
                 camera_name_in_rds_hq = settings['CAMERAS_TO_RDS_HQ'][camera_name]    
                 intrinsic_data = get_sample(intrinsic_file)
                 intrinsic_this_cam = intrinsic_data[f"{camera_type}_intrinsic.{camera_name_in_rds_hq}.npy"]
@@ -137,7 +137,7 @@ def prepare_input(input_root, clip_id, settings, camera_type, post_training, res
             rescale_h = resize_h / camera_model.height
             rescale_w = resize_w / camera_model.width
 
-            assert abs(rescale_h - rescale_w) < 0.01 # only handle the case that height is downsampled by the same ratio, required by the ftheta camera model
+            assert abs(rescale_h - rescale_w) < 0.02 # only handle the case that height is downsampled by the same ratio, required by the ftheta camera model
             camera_model.rescale(rescale_h)
         else:
             raise ValueError(f"Invalid camera type: {camera_type}")
@@ -319,14 +319,15 @@ def render_sample_lidar(
         interp_rate = INPUT_POSE_FPS // INPUT_LIDAR_FPS
         for frame_idx in render_frame_ids:
             accumulate_idx = [min(max(0, frame_idx + i * interp_rate), frame_num-1) for i in range(-accumulate_lidar_frames, accumulate_lidar_frames+1)]
-            low_fps_frame_indices, _ = get_low_fps_indices(accumulate_idx, step=interp_rate)
+            low_fps_frame_indices, _ = get_nearest_lidar_indices(accumulate_idx, step=interp_rate)
 
-            frame_ids = [
-                int(key.split('.')[0])
-                for key in lidar_data.keys()
-                if key.endswith('.lidar_raw.npz') and key.split('.')[0].isdigit()
+            lidar_frame_ids = [
+                int(key.split('.')[0]) for key in lidar_data.keys() if key.endswith('.lidar_raw.npz') and key.split('.')[0].isdigit()
             ]
-            max_lidar_idx = max(frame_ids)
+            valid_lidar_frame_ids = [
+                x for x in lidar_frame_ids if x <= render_frame_ids[-1]
+            ]
+            max_lidar_idx = max(valid_lidar_frame_ids)
             low_fps_frame_indices = [min(max_lidar_idx, idx) for idx in low_fps_frame_indices]
 
             accumulated_points, original_bbox_dicts, moved_bbox_dicts = [], [], []
@@ -354,7 +355,15 @@ def render_sample_lidar(
             lengths_tensor = torch.tensor([t.shape[0] for t in accumulated_points_corrected], device='cuda')
             cat_points = torch.cat(accumulated_points_corrected, dim=0)
             w2cs = torch.inverse(torch.tensor(pose_all_frames[frame_idx])).unsqueeze(0).cuda()
-            intrinsics = torch.tensor(camera_model.intrinsics).unsqueeze(0).to(cat_points)
+            if camera_type == 'ftheta':
+                cx_cy_w_h = camera_model.intrinsics[:4]
+                bw_poly = camera_model._bw_poly.coef
+                is_bw_poly = 1
+                intrinsics = torch.tensor(
+                    [*cx_cy_w_h, *bw_poly, is_bw_poly]
+                ).unsqueeze(0).to(cat_points)
+            else:
+                intrinsics = torch.tensor(camera_model.intrinsics).unsqueeze(0).to(cat_points)
             depth, mask = forward_warp_multiframes_sparse_depth_only(
                 w2cs,
                 intrinsics,
@@ -444,7 +453,7 @@ def render_sample_rgb(
             
 @click.command()
 @click.option("--input_root", '-i', type=str, help="the root folder of RDS-HQ or RDS-HQ format dataset")
-@click.option("--clip_id_json", "-cj", type=str, default=None, help="the path to the clip id json file. If provided, we just render the clips in the json file.")
+@click.option("--clip_id_json", "-cj", type=str, default=None, help="exact clip id or path to the clip id json file. If provided, we just render the clips in the json file.")
 @click.option("--output_root", '-o', type=str, required=True, help="the root folder for the output data")
 @click.option("--dataset", "-d", type=str, default="rds_hq", help="the dataset name, 'rds_hq', 'rds_hd_mv', 'waymo' or 'waymo_mv', see xxx.json in config folder")
 @click.option("--camera_type", "-c", type=str, default="ftheta", help="the type of camera model, 'pinhole' or 'ftheta'")
@@ -475,12 +484,12 @@ def main(input_root, clip_id_json, output_root, dataset, camera_type, skip, post
     if to_cosmos_resolution == 'resize':
         if resize_resolution != cosmos_resolution:
             print(f"Original Resolution -> 1. {colored('Resize', 'yellow', attrs=['bold'])} to {colored(resize_resolution, 'yellow', attrs=['bold'])} for {camera_type} camera model.")
-            print(f"                    -> 2. {colored('Resize', 'yellow', attrs=['bold'])} to {colored(cosmos_resolution, 'yellow', attrs=['bold'])} for cosmos training.")
+            print(f"                    -> 2. {colored('Resize', 'yellow', attrs=['bold'])} to {colored(cosmos_resolution, 'yellow', attrs=['bold'])} for cosmos model.")
         else:
-            print(f"Original Resolution -> 1. {colored('Resize', 'yellow', attrs=['bold'])} to {colored(cosmos_resolution, 'yellow', attrs=['bold'])} for {camera_type} camera model and cosmos training.")
+            print(f"Original Resolution -> 1. {colored('Resize', 'yellow', attrs=['bold'])} to {colored(cosmos_resolution, 'yellow', attrs=['bold'])} for {camera_type} camera model and cosmos model.")
     else:
         print(f"Original Resolution -> 1. {colored('Resize', 'yellow', attrs=['bold'])} to {colored(resize_resolution, 'yellow', attrs=['bold'])} for {camera_type} camera model.")
-        print(f"                    -> 2. {colored('Center Crop', 'magenta', attrs=['bold'])} to {colored(cosmos_resolution, 'magenta', attrs=['bold'])} for cosmos training.")
+        print(f"                    -> 2. {colored('Center Crop', 'magenta', attrs=['bold'])} to {colored(cosmos_resolution, 'magenta', attrs=['bold'])} for cosmos model.")
 
 
 
@@ -489,13 +498,15 @@ def main(input_root, clip_id_json, output_root, dataset, camera_type, skip, post
         output_root = f'{output_root}_{novel_pose_folder}'
 
     # get all clip ids
-    if clip_id_json is not None:
-        clip_list = json.load(open(clip_id_json))
-    else:
+    if clip_id_json is None:
         input_root_p = Path(input_root)
         pose_folder = 'pose' if novel_pose_folder is None else novel_pose_folder
         clip_list = (input_root_p / pose_folder).rglob('*.tar')
         clip_list = [c.stem for c in clip_list]
+    elif clip_id_json.endswith('.json'):
+        clip_list = json.load(open(clip_id_json))
+    else:
+        clip_list = [clip_id_json]
 
     # shuffle the clip list
     np.random.seed(0)

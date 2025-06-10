@@ -209,10 +209,10 @@ class FThetaCamera(CameraBase):
         Returns:
             FThetaCamera: the newly created object.
         """
-        cx, cy, width, height, bw_poly = FThetaCamera.get_ftheta_parameters_from_json(
+        cx, cy, width, height, bw_poly, is_bw_poly, linear_cde = FThetaCamera.get_ftheta_parameters_from_json(
             rig_dict
         )
-        return cls(cx, cy, width, height, bw_poly)
+        return cls(cx, cy, width, height, bw_poly, is_bw_poly, linear_cde)
 
     @classmethod
     def from_numpy(cls, intrinsics: np.ndarray, device=None):
@@ -220,7 +220,7 @@ class FThetaCamera(CameraBase):
 
         Args:
             intrinsics (np.ndarray): the intrinsics array. The ordering is expected to be
-                "cx, cy, width, height, poly (more coefficients), is_bw_poly". This is the same ordering as the `intrinsics`
+                "cx, cy, width, height, *poly (6 coefficients), is_bw_poly, (linear_c, linear_d, linear_e)". This is the same ordering as the `intrinsics`
                 property of this class.
 
         Returns:
@@ -231,8 +231,9 @@ class FThetaCamera(CameraBase):
             cy=intrinsics[1],
             width=intrinsics[2],
             height=intrinsics[3],
-            is_bw_poly=intrinsics[-1] > 0,
-            poly=intrinsics[4:-1],
+            poly=intrinsics[4:10],
+            is_bw_poly=intrinsics[10] > 0,
+            linear_cde=np.array([1, 0, 0], dtype=np.float32) if len(intrinsics) < 14 else intrinsics[11:14],
             device=device
         )
 
@@ -244,6 +245,7 @@ class FThetaCamera(CameraBase):
         height: int, 
         poly: np.ndarray = None, 
         is_bw_poly: bool = True, 
+        linear_cde: np.ndarray = np.array([1, 0, 0], dtype=np.float32),
         dtype=torch.float32, 
         device=None
     ):
@@ -256,13 +258,27 @@ class FThetaCamera(CameraBase):
             height (int): the height of the image.
             is_bw_poly (bool): whether the poly is bw poly
             poly (np.ndarray): the polynomial of the FTheta model. Usually 5 coefficients.
+            linear_cde (np.ndarray): the linear constrain matrix of the FTheta model. Usually 3 coefficients. 
+                A = [[c, d], [e, 1]]. A is used in forward (ray2pixel) mapping
             device (str): the device to use. if None, use cuda if available, otherwise cpu.
         """
+        assert len(poly) == 6, f"poly must have 6 coefficients, got {len(poly)}"
+        assert len(linear_cde) == 3, f"linear_cde must have 3 coefficients, got {len(linear_cde)}"
+        
         self._center = np.asarray([cx, cy], dtype=np.float32)
         self._width = int(width)
         self._height = int(height)
         self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.dtype = dtype
+        self.reference_poly = 'bw' if is_bw_poly else 'fw'
+
+        # new: sometimes we have non-identity linear constrain matrix
+        # todo: this should be applied to forward / backward projection
+        self.linear_cde = linear_cde
+        c, d, e = linear_cde.tolist()
+
+        self.A = np.array([[c, d], [e, 1]], dtype=np.float32)
+        self.inv_A = np.array([[1, -d], [-e, c]], dtype=np.float32) / (c - e * d)
 
         if is_bw_poly:
             self._bw_poly = Polynomial(poly)
@@ -277,8 +293,8 @@ class FThetaCamera(CameraBase):
         self._max_angle = None
         self._max_ray_angle = None
 
-        # Populate the array of intrinsics
-        self._intrinsics = np.array([cx, cy, width, height, *poly, 1 if is_bw_poly else 0], dtype=np.float32)
+        # Populate the array of intrinsics. We need to store the reference poly instead of approximated poly
+        self._intrinsics = np.array([cx, cy, width, height, *poly, 1 if is_bw_poly else 0, *linear_cde], dtype=np.float32)
 
         self._update_calibrated_camera()
         self._cache_torch_tensors()
@@ -291,21 +307,37 @@ class FThetaCamera(CameraBase):
         self._fw_poly_powers_torch = torch.arange(len(self._fw_poly_torch), dtype=self.dtype, device=self.device)
         self._max_ray_distortion_torch = torch.tensor(self._max_ray_distortion, dtype=self.dtype, device=self.device)
         self._center_torch = torch.tensor(self._center, dtype=self.dtype, device=self.device)
-
+        self._A_torch = torch.tensor(self.A, dtype=self.dtype, device=self.device)
+        self._inv_A_torch = torch.tensor(self.inv_A, dtype=self.dtype, device=self.device)
 
     def rescale(self, ratio: float):
+        """
+        if rescale to a smaller image, ratio < 1
+        """
         self._width = int(self._width * ratio)
         self._height = int(self._height * ratio)
         self._center = self._center * ratio
 
-        # update backward poly. if ratio = 0.5, bw_poly_coef[i] = bw_poly_coef[i] * (2 ** i)
-        bw_poly_coef = self._bw_poly.coef
-        for i in range(len(bw_poly_coef)):
-            bw_poly_coef[i] = bw_poly_coef[i] * (1 / ratio) ** i
+        # update poly. if ratio = 0.5, bw_poly_coef[i] = bw_poly_coef[i] * (2 ** i)
+        if self.reference_poly == 'bw':
+            bw_poly_coef = self._bw_poly.coef
+            for i in range(len(bw_poly_coef)):
+                bw_poly_coef[i] = bw_poly_coef[i] * (1 / ratio) ** i
 
-        self._bw_poly = Polynomial(bw_poly_coef)
-        self._fw_poly = self._compute_fw_poly()
-        self._intrinsics = np.array([self._center[0], self._center[1], self._width, self._height, *bw_poly_coef, 1], dtype=np.float32)
+            self._intrinsics = np.array([self._center[0], self._center[1], self._width, self._height, *bw_poly_coef, 1, *self.linear_cde], dtype=np.float32)
+            self._bw_poly = Polynomial(bw_poly_coef)
+            self._fw_poly = self._compute_fw_poly()
+
+        elif self.reference_poly == 'fw':
+            fw_poly_coef = self._fw_poly.coef
+            fw_poly_coef /= (1 / ratio)
+
+            self._intrinsics = np.array([self._center[0], self._center[1], self._width, self._height, *fw_poly_coef, 0, *self.linear_cde], dtype=np.float32)
+            self._fw_poly = Polynomial(fw_poly_coef)
+            self._bw_poly = self._compute_bw_poly()
+
+        else:
+            raise ValueError(f"Invalid reference poly: {self.reference_poly}")
 
         # update cached torch tensors
         self._update_calibrated_camera()
@@ -343,36 +375,26 @@ class FThetaCamera(CameraBase):
             # specifically. Refer to the following thread for more details:
             # https://nvidia.slack.com/archives/C017LLEG763/p1633304770105300
             poly_type = props["polynomial-type"]
-            assert poly_type == "pixeldistance-to-angle", (
-                "Encountered an unsupported VT rig. Only `pixeldistance-to-angle` "
-                f"polynomials are supported (got {poly_type}). Rig:\n{rig_dict}"
-            )
+            if poly_type == "pixeldistance-to-angle":
+                is_bw_poly = True
+            elif poly_type == "angle-to-pixeldistance":
+                is_bw_poly = False
+            else:
+                raise ValueError(f"Unsupported polynomial type: {poly_type} from rig dict {rig_dict}")
+            
+            linear_c = float(props["linear-c"]) if "linear-c" in props else 1
+            linear_d = float(props["linear-d"]) if "linear-d" in props else 0
+            linear_e = float(props["linear-e"]) if "linear-e" in props else 0
 
-            linear_c = float(props["linear-c"]) if "linear-c" in props else None
-            linear_d = float(props["linear-d"]) if "linear-d" in props else None
-            linear_e = float(props["linear-e"]) if "linear-e" in props else None
-
-            # If we had all the terms present, sanity check to make sure they are [1, 0, 0]
-            if linear_c is not None and linear_d is not None and linear_e is not None:
-                assert (
-                    linear_c == 1.0
-                ), f"Expected `linear-c` term to be 1.0 (got {linear_c}. Rig:\n{rig_dict})"
-                assert (
-                    linear_d == 0.0
-                ), f"Expected `linear-d` term to be 0.0 (got {linear_d}. Rig:\n{rig_dict})"
-                assert (
-                    linear_e == 0.0
-                ), f"Expected `linear-e` term to be 0.0 (got {linear_e}. Rig:\n{rig_dict})"
-
-            # If we're here, then it means we can parse the rig successfully.
             poly = props["polynomial"]
+            linear_cde = np.array([linear_c, linear_d, linear_e], dtype=np.float32)
         else:
             raise ValueError(
                 f"Unable to parse the rig. Only FTheta rigs are supported! Rig:\n{rig_dict}"
             )
 
         bw_poly = [np.float32(val) for val in poly.split()]
-        return cx, cy, width, height, bw_poly
+        return cx, cy, width, height, bw_poly, is_bw_poly, linear_cde
 
     @property
     def fov(self) -> tuple:
@@ -401,7 +423,7 @@ class FThetaCamera(CameraBase):
         """Obtain an array of the intrinsics of this camera model.
 
         Returns:
-            np.ndarray: an array of intrinsics. The ordering is "cx, cy, width, height, poly, is_bw_poly".
+            np.ndarray: an array of intrinsics. The ordering is "cx, cy, width, height, poly, is_bw_poly, linear_c, linear_d, linear_e".
                 dtype is np.float32.
         """
         return self._intrinsics
@@ -421,6 +443,7 @@ class FThetaCamera(CameraBase):
         is_fw_poly_slope_negative_in_domain = False
         ray_angle = (np.float32(self._max_ray_angle)).copy()
         deg2rad = np.pi / 180.0
+
         while ray_angle >= np.float32(0.0):
             temp_dval = self._fw_poly.deriv()(self._max_ray_angle).item()
             if temp_dval < 0:
@@ -512,7 +535,7 @@ class FThetaCamera(CameraBase):
 
         # Fix the type
         x = x.astype(np.float32)
-        xd = x - self._center
+        xd = np.einsum('ij,nj -> ni', self.inv_A, x - self._center)
         xd_norm = np.linalg.norm(xd, axis=1, keepdims=True)
         alpha = self._bw_poly(xd_norm)
         sin_alpha = np.sin(alpha)
@@ -546,7 +569,7 @@ class FThetaCamera(CameraBase):
             pixels = pixels.unsqueeze(0)
 
         # Calculate the offset relative to the optical center
-        xd = pixels - self._center_torch
+        xd = torch.einsum('ij,nj -> ni', self._inv_A_torch, pixels - self._center_torch)
         xd_norm = torch.norm(xd, dim=1, keepdim=False)
         
         # Calculate angle
@@ -621,7 +644,7 @@ class FThetaCamera(CameraBase):
         # Handle the edge cases (ray along image plane normal)
         edge_case_cond = (xy_norm <= 0).squeeze()
         pixel[edge_case_cond, :] = rays[edge_case_cond, :]
-        result = pixel[:, :2] + self._center
+        result = np.einsum('ij,nj -> ni', self.A, pixel[:, :2]) + self._center
 
         return result
     
@@ -677,7 +700,7 @@ class FThetaCamera(CameraBase):
         edge_case_cond = (xy_norm <= 0).squeeze()
         pixel[edge_case_cond, :] = rays[edge_case_cond, :]
         
-        result = pixel[:, :2] + self._center_torch
+        result = torch.einsum('ij,nj -> ni', self._A_torch, pixel[:, :2]) + self._center_torch
 
         return result
     

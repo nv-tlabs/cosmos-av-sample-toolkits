@@ -23,7 +23,6 @@ CLASS_COLORS = {
     "Others": [255, 255, 255],
 }
 
-
 def create_bbox_projection(all_object_info, camera_poses, valid_frame_ids, camera_model):
     """
     Create a projection of bounding boxes on the minimap.
@@ -57,10 +56,29 @@ def create_bbox_projection(all_object_info, camera_poses, valid_frame_ids, camer
             object_info = current_object_info[tracking_id]
 
             if object_info['object_type'] not in CLASS_COLORS:
+                # labels from category v1
                 if object_info['object_type'] == "Bus":
                     object_info['object_type'] = "Truck"
+                # labels from category v1
                 elif object_info['object_type'] == 'Vehicle':
                     object_info['object_type'] = "Car"
+
+                # labels from category v2
+                elif object_info['object_type'] == "Heavy_truck" or \
+                   object_info['object_type'] == "Train_or_tram_car" or \
+                   object_info['object_type'] == "Trolley_bus" or \
+                   object_info['object_type'] == "Trailer":
+                    object_info['object_type'] = "Truck"
+                # labels from category v2
+                elif object_info['object_type'] == 'Automobile' or \
+                     object_info['object_type'] == 'Other_vehicle':
+                    object_info['object_type'] = "Car"
+                # labels from category v2
+                elif object_info['object_type'] == 'Person':
+                    object_info['object_type'] = "Pedestrian"
+                # labels from category v2
+                elif object_info['object_type'] == 'Rider':
+                    object_info['object_type'] = "Cyclist"
                 else:
                     object_info['object_type'] = "Others"
 
@@ -222,73 +240,7 @@ def interpolate_bbox(all_object_info, valid_frame_ids):
     return interpolated_all_object_info
 
 
-def quaternion_mean(quaternions):
-    """
-    Compute the mean of quaternions (resolving double-cover issue).
-
-    Args:
-        quaternions (np.ndarray): Array of quaternions, shape (N, 4).
-
-    Returns:
-        np.ndarray: Mean quaternion, shape (4,).
-    """
-    cprint("Do not use this function to compute mean quaternion.", color="red")
-
-    quaternions = np.array(quaternions)
-
-    # Unify quaternion signs (ensure w is positive)
-    for i in range(len(quaternions)):
-        if quaternions[i, 0] < 0:  # Flip quaternion if w is negative
-            quaternions[i] = -quaternions[i]
-
-    # Calculate mean quaternion
-    mean_quaternion = np.mean(quaternions, axis=0)
-    mean_quaternion /= np.linalg.norm(mean_quaternion)  # Normalize
-
-    return mean_quaternion
-
-def rotation_matrix_mean(rotation_matrices):
-    """
-    Compute the mean rotation matrix from a set of rotation matrices (based on quaternions).
-
-    Args:
-        rotation_matrices (list of np.ndarray): List of rotation matrices (3x3).
-
-    Returns:
-        np.ndarray: Mean rotation matrix (3x3).
-    """
-    cprint("Do not use this function to compute mean rotation matrix.", color="red")
-
-    # Convert rotation matrices to Rotation objects
-    rotations = [R.from_matrix(R_matrix) for R_matrix in rotation_matrices]
-
-    # Convert Rotation objects to quaternions
-    quaternions = [rotation.as_quat() for rotation in rotations]
-
-    # Compute mean quaternion
-    mean_quaternion = quaternion_mean(quaternions)
-
-    # Convert mean quaternion back to Rotation object
-    mean_rotation = R.from_quat(mean_quaternion)
-
-    # Convert Rotation object back to rotation matrix
-    mean_rotation_matrix = mean_rotation.as_matrix()
-
-    return mean_rotation_matrix
-
-
 def fix_static_objects(all_object_info):
-    """
-    Fix static bbox, avoid bbox jittering. 
-    
-    We have labels for static objects, but their object_lwh and object_to_world are changing 
-    across frames. We find the mean lwh of static objects in all frames, and use the mean lwh to 
-    replace the object_lwh of static objects in all frames.
-
-    Further, we find the most common heading of static objects in all frames, and use the it to 
-    replace the object_to_world of static objects in all frames. Sometimes the headings will change 180 degrees,
-    """
-
     ############## 1. fix object_lwh ##############
     # record the lwh of static objects
     static_tracking_id_to_lwhs = {}

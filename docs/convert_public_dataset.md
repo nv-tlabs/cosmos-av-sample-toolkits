@@ -1,12 +1,9 @@
 ## Convert Public Datasets
 
 ### Installation
-Waymo Open Dataset requires lower python version. You need to install it with a new conda environment.
+Install dependency for Waymo Open Dataset
 ```bash
-conda create -n waymo python=3.10
-conda activate waymo
-conda install -c conda-forge ffmpeg
-pip install waymo-open-dataset-tf-2-11-0==1.6.1 webdataset python-pycg termcolor imageio[ffmpeg]
+pip install waymo-open-dataset-tf-2-11-0==1.6.1
 ```
 
 #### Step 0: Check Our Provided Captions

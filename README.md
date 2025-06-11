@@ -1,4 +1,4 @@
-This repository has been deprecated and is no longer maintained. New repo: https://github.com/nv-tlabs/Cosmos-Drive-Dreams
+This repository is no longer maintained. You can still use it for Cosmos-Transfer1. New repo: https://github.com/nv-tlabs/Cosmos-Drive-Dreams
 
 -----------
 

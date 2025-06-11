@@ -1,3 +1,7 @@
+This repository has been deprecated and is no longer maintained. New repo: https://github.com/nv-tlabs/Cosmos-Drive-Dreams
+
+-----------
+
 # Cosmos-AV-Sample Toolkits
 This repo provides toolkits for:
 
